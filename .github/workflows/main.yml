@@ -1,0 +1,92 @@
+name: cd-ecr
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  continuous-integration:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - name: CI check
+        run: echo "CI completed"
+
+  continuous-delivery:
+    needs: continuous-integration
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Validate AWS secrets
+        env:
+          AWS_ACCESS_KEY_ID_INPUT: ${{ secrets.AWS_ACCESS_KEY_ID || secrets.AWS_ACCESS_KEY || vars.AWS_ACCESS_KEY_ID || vars.AWS_ACCESS_KEY }}
+          AWS_SECRET_ACCESS_KEY_INPUT: ${{ secrets.AWS_SECRET_ACCESS_KEY || secrets.AWS_SECRET_KEY || secrets.AWS_SECRET_ACCESS_KEY_ID || vars.AWS_SECRET_ACCESS_KEY || vars.AWS_SECRET_KEY || vars.AWS_SECRET_ACCESS_KEY_ID }}
+          AWS_REGION_INPUT: ${{ secrets.AWS_REGION || vars.AWS_REGION }}
+          AWS_ECR_LOGIN_URI_INPUT: ${{ secrets.AWS_ECR_LOGIN_URI || vars.AWS_ECR_LOGIN_URI }}
+        run: |
+          test -n "$AWS_ACCESS_KEY_ID_INPUT" || { echo "::error::Missing AWS access key in Secrets/Variables"; exit 1; }
+          test -n "$AWS_SECRET_ACCESS_KEY_INPUT" || { echo "::error::Missing AWS secret key in Secrets/Variables"; exit 1; }
+          test -n "$AWS_REGION_INPUT" || { echo "::error::Missing AWS_REGION in Secrets/Variables"; exit 1; }
+          test -n "$AWS_ECR_LOGIN_URI_INPUT" || { echo "::error::Missing AWS_ECR_LOGIN_URI in Secrets/Variables"; exit 1; }
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID || secrets.AWS_ACCESS_KEY || vars.AWS_ACCESS_KEY_ID || vars.AWS_ACCESS_KEY }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY || secrets.AWS_SECRET_KEY || secrets.AWS_SECRET_ACCESS_KEY_ID || vars.AWS_SECRET_ACCESS_KEY || vars.AWS_SECRET_KEY || vars.AWS_SECRET_ACCESS_KEY_ID }}
+          aws-region: ${{ secrets.AWS_REGION || vars.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+        with:
+          mask-password: 'true'
+
+      - name: Build, tag and push Docker image
+        env:
+          ECR_IMAGE_URI: ${{ secrets.AWS_ECR_LOGIN_URI || vars.AWS_ECR_LOGIN_URI }}
+          IMAGE_TAG: latest
+        run: |
+          docker build -t networksecurity:$IMAGE_TAG .
+          docker tag networksecurity:$IMAGE_TAG $ECR_IMAGE_URI:$IMAGE_TAG
+          docker push $ECR_IMAGE_URI:$IMAGE_TAG
+
+  continuous-deployment:
+    needs: continuous-delivery
+    runs-on: self-hosted
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID || secrets.AWS_ACCESS_KEY || vars.AWS_ACCESS_KEY_ID || vars.AWS_ACCESS_KEY }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY || secrets.AWS_SECRET_KEY || secrets.AWS_SECRET_ACCESS_KEY_ID || vars.AWS_SECRET_ACCESS_KEY || vars.AWS_SECRET_KEY || vars.AWS_SECRET_ACCESS_KEY_ID }}
+          aws-region: eu-north-1
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+        with:
+          mask-password: 'true'
+
+      - name: Pull latest image
+        run: docker pull 047588357673.dkr.ecr.eu-north-1.amazonaws.com/networksecurity2:latest
+
+      - name: Stop existing container
+        run: docker stop networksecurity || true
+
+      - name: Remove old container
+        run: docker rm networksecurity || true
+
+      - name: Run new container
+        run: |
+          docker run -d \
+            -p 8080:8080 \
+            --name networksecurity \
+            047588357673.dkr.ecr.eu-north-1.amazonaws.com/networksecurity2:latest
+
+      - name: Clean unused images
+        run: docker image prune -af
